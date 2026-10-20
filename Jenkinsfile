@@ -1,6 +1,19 @@
-
+```groovy
 pipeline {
     agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+    }
+
+    environment {
+        PROD_HOST = '45.220.54.15'
+        PROD_USER = 'appuser'
+        APP_DIR = '/opt/python-app'
+        SSH_KEY = '/var/lib/jenkins/.ssh/production_deploy'
+        SERVICE_NAME = 'flaskapp.service'
+    }
 
     stages {
         stage('Checkout') {
@@ -9,28 +22,45 @@ pipeline {
             }
         }
 
-        stage('Prepare Python Environment') {
+        stage('Validate Project') {
             steps {
                 sh '''
                     set -eu
 
+                    test -f app.py
+                    test -f requirements.txt
 
-                    sudo mkdir -p /opt/python-app
-                    sudo rsync -a \
-                        --exclude='.git/' \
-                        --exclude='venv/' \
-                        --exclude='.venv/' \
-                        ./ /opt/python-app/
+                    echo "Project files validated successfully"
+                '''
+            }
+        }
 
-                    sudo chown -R appuser:appuser /opt/python-app
+        stage('Test SSH Connection') {
+            steps {
+                sh '''
+                    set -eu
 
-                    sudo -u appuser python3 -m venv /opt/python-app/venv
+                    chmod 600 "$SSH_KEY"
 
-                    sudo -u appuser /opt/python-app/venv/bin/pip \
-                        install -r /opt/python-app/requirements.txt
+                    ssh -i "$SSH_KEY" \
+                        -o BatchMode=yes \
+                        -o ConnectTimeout=10 \
+                        "$PROD_USER@$PROD_HOST" \
+                        'echo "SSH connection successful"'
+                '''
+            }
+        }
 
-                    sudo -u appuser /opt/python-app/venv/bin/pip \
-                        install gunicorn
+        stage('Prepare Production') {
+            steps {
+                sh '''
+                    set -eu
+
+                    ssh -i "$SSH_KEY" \
+                        -o BatchMode=yes \
+                        "$PROD_USER@$PROD_HOST" \
+                        'test -d /opt/python-app/venv &&
+                         test -w /opt/python-app'
                 '''
             }
         }
@@ -40,14 +70,53 @@ pipeline {
                 sh '''
                     set -eu
 
-                    sudo systemctl restart flaskapp.service
-                    sleep 2
+                    rsync -az --delete \
+                        --exclude='.git/' \
+                        --exclude='venv/' \
+                        --exclude='.venv/' \
+                        --exclude='__pycache__/' \
+                        --exclude='.env' \
+                        --exclude='.pytest_cache/' \
+                        -e "ssh -i $SSH_KEY -o BatchMode=yes" \
+                        ./ "$PROD_USER@$PROD_HOST:$APP_DIR/"
 
-                    sudo systemctl is-active --quiet flaskapp.service
+                    ssh -i "$SSH_KEY" \
+                        -o BatchMode=yes \
+                        "$PROD_USER@$PROD_HOST" \
+                        'set -eu
+                         cd /opt/python-app
+                         ./venv/bin/pip install -r requirements.txt
+                         ./venv/bin/pip install gunicorn'
+                '''
+            }
+        }
+
+        stage('Restart Service') {
+            steps {
+                sh '''
+                    set -eu
+
+                    ssh -i "$SSH_KEY" \
+                        -o BatchMode=yes \
+                        "$PROD_USER@$PROD_HOST" \
+                        'sudo -n systemctl restart flaskapp.service &&
+                         sleep 2 &&
+                         sudo -n systemctl is-active --quiet flaskapp.service'
 
                     echo "Deployment completed successfully"
                 '''
             }
         }
     }
+
+    post {
+        success {
+            echo 'Production deployment succeeded.'
+        }
+
+        failure {
+            echo 'Deployment failed. Check the stage logs before retrying.'
+        }
+    }
 }
+```
