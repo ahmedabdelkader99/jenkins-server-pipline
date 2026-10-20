@@ -1,47 +1,53 @@
+
 pipeline {
     agent any
 
-    environment {
-        SERVER_IP = credentials('prod-server-ip')
-    }
     stages {
-        stage('Setup') {
+        stage('Checkout') {
             steps {
-                sh "pip install -r requirements.txt"
-            }
-        }
-        stage('Test') {
-            steps {
-                sh "pytest"
+                checkout scm
             }
         }
 
-        stage('Package code') {
+        stage('Prepare Python Environment') {
             steps {
-                sh "zip -r myapp.zip ./* -x '*.git*'"
-                sh "ls -lart"
+                sh '''
+                    set -eu
+
+
+                    sudo mkdir -p /opt/python-app
+                    sudo rsync -a \
+                        --exclude='.git/' \
+                        --exclude='venv/' \
+                        --exclude='.venv/' \
+                        ./ /opt/python-app/
+
+                    sudo chown -R appuser:appuser /opt/python-app
+
+                    sudo -u appuser python3 -m venv /opt/python-app/venv
+
+                    sudo -u appuser /opt/python-app/venv/bin/pip \
+                        install -r /opt/python-app/requirements.txt
+
+                    sudo -u appuser /opt/python-app/venv/bin/pip \
+                        install gunicorn
+                '''
             }
         }
 
-        stage('Deploy to Prod') {
+        stage('Deploy') {
             steps {
-                withCredentials([sshUserPrivateKey(credentialsId: 'ssh-key', keyFileVariable: 'MY_SSH_KEY', usernameVariable: 'username')]) {
-                    sh '''
-                    scp -i $MY_SSH_KEY -o StrictHostKeyChecking=no myapp.zip  ${username}@${SERVER_IP}:/home/ec2-user/
-                    ssh -i $MY_SSH_KEY -o StrictHostKeyChecking=no ${username}@${SERVER_IP} << EOF
-                        unzip -o /home/ec2-user/myapp.zip -d /home/ec2-user/app/
-                        source app/venv/bin/activate
-                        cd /home/ec2-user/app/
-                        pip install -r requirements.txt
-                        sudo systemctl restart flaskapp.service
-EOF
-                    '''
-                }
+                sh '''
+                    set -eu
+
+                    sudo systemctl restart flaskapp.service
+                    sleep 2
+
+                    sudo systemctl is-active --quiet flaskapp.service
+
+                    echo "Deployment completed successfully"
+                '''
             }
         }
-       
-        
-       
-        
     }
 }
